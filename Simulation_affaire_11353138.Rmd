@@ -1,0 +1,374 @@
+---
+title: "ModeleRF_11353138"
+author: "Cristian Samson"
+date: "2024-11-22"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+
+```{r cars}
+# Clear the environment
+rm(list = ls())
+
+# Charger les bibliothèques nécessaires
+library(caret)
+library(rpart)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(stringr) # Pour utiliser str_extract
+
+#== PRETRAITEMENT DES DONNÉES ==#
+
+# Lire les données
+repairs <- read.csv("C:/Users/samso/OneDrive/Bureau/Apprentissage statistique/Devoir 1/repairs.csv")
+sensors_study <- read.csv("C:/Users/samso/OneDrive/Bureau/Apprentissage statistique/Devoir 1/sensors-study.csv")
+
+# Reshaper les données avec un ID par lignes
+sensors_study_reshaped <- sensors_study %>%
+  pivot_wider(names_from = Month, values_from = c(Volume, Energy, starts_with("PSD"))) %>%
+  rename_with(~ gsub("_", "", .), starts_with("Volume_")) %>%
+  rename_with(~ gsub("_", "", .), starts_with("Energy_")) %>%
+  rename_with(~ gsub("_", "", .), starts_with("PSD"))
+
+# Calcul des colonnes d'efficacité pour chaque mois
+# Étape 1 : Créer une liste des colonnes Volume et Energy
+volume_cols <- grep("^Volume\\d+$", names(sensors_study_reshaped), value = TRUE)
+energy_cols <- gsub("Volume", "Energy", volume_cols)
+
+# Étape 2 : Ajouter les colonnes d'efficacité
+for (i in seq_along(volume_cols)) {
+  sensors_study_reshaped <- sensors_study_reshaped %>%
+    mutate(!!paste0("Efficacite", str_extract(volume_cols[i], "\\d+$")) := 
+             !!sym(volume_cols[i]) / !!sym(energy_cols[i]))
+}
+
+# Nettoyer et fusionner les données
+repairs$Cost6[is.na(repairs$Cost6)] <- 0 
+
+study_data <- sensors_study_reshaped %>%
+  left_join(repairs, by = "ID") %>%
+  mutate(Treatment = ifelse(Cost6 > 0, 1, 0))
+
+#== ANALYSE EXPLORATOIRE ==#
+
+#1. Visualiser la courbe de l'efficacité moyenne (Volume/Energy) à travers les 12 mois
+
+# Calculer l'efficacité moyenne pour chaque mois
+efficiency_columns <- grep("^Efficacite\\d+$", names(study_data), value = TRUE)
+mean_efficiency <- study_data %>%
+  summarise(across(all_of(efficiency_columns), mean, na.rm = TRUE))
+
+# Transformer les données en format long pour ggplot
+mean_efficiency_long <- mean_efficiency %>%
+  pivot_longer(cols = everything(), 
+               names_to = "Mois", 
+               values_to = "Efficacite") %>%
+  mutate(Mois = as.numeric(gsub("Efficacite", "", Mois)))
+
+# Créer le graphique
+ggplot(mean_efficiency_long, aes(x = Mois, y = Efficacite)) +
+  geom_line(color = "blue", size = 1) +
+  geom_point(color = "red", size = 2) +
+  labs(title = "Évolution de l'efficacité moyenne (Volume/Energy) à travers 12 mois",
+       x = "Mois", 
+       y = "Efficacité Moyenne (Volume/Energy)") +
+  theme_minimal()
+
+#== Test statistique (ANOVA ou autre) pour évaluer si le pic à 6 mois est significativement différent des autres mois.
+# Identifier les colonnes d'efficacité
+efficiency_columns <- grep("^Efficacite\\d+$", names(study_data), value = TRUE)
+
+# Reshaper les données pour ANOVA
+anova_data <- study_data %>%
+  select(ID, all_of(efficiency_columns)) %>%
+  pivot_longer(cols = -ID, names_to = "Mois", values_to = "Efficacite") %>%
+  mutate(Mois = as.numeric(gsub("Efficacite", "", Mois)))
+
+# Effectuer le test ANOVA
+anova_result <- aov(Efficacite ~ as.factor(Mois), data = anova_data)
+summary(anova_result)
+
+# Optionnel : Afficher la p-value
+p_value <- summary(anova_result)[[1]]$`Pr(>F)`[1]
+cat("P-value : ", p_value, "\n")
+
+#La p-value est bien inférieure à 0.05, 
+#indiquant que les différences d'efficacité entre les mois sont statistiquement significatives.
+
+#Visualiser cette courbe d'efficacité à travers l'année pour le groupe traitement et le groupe contrôle
+
+# Calculer l'efficacité moyenne pour chaque groupe (avec et sans entretien)
+comparison_data <- study_data %>%
+  pivot_longer(cols = all_of(efficiency_columns), 
+               names_to = "Mois", 
+               values_to = "Efficacite") %>%
+  mutate(Mois = as.numeric(gsub("Efficacite", "", Mois))) %>%
+  group_by(Treatment, Mois) %>%
+  summarise(Efficacite_Moyenne = mean(Efficacite, na.rm = TRUE), .groups = "drop")
+
+# Créer le graphique
+ggplot(comparison_data, aes(x = Mois, y = Efficacite_Moyenne, color = as.factor(Treatment))) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("orange", "blue"), 
+                     labels = c("Sans entretien (6 mois)", "Avec entretien (6 mois)")) +
+  labs(
+    title = "Comparaison de l'efficacité moyenne (Volume/Energy)",
+    subtitle = "Entre les pompes avec et sans entretien à 6 mois",
+    x = "Mois",
+    y = "Efficacité Moyenne (Volume/Energy)",
+    color = "Groupe"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 11),
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 12),
+    axis.title = element_text(size = 13),
+    axis.text = element_text(size = 11)
+  )
+
+#== TROUVER LA PROPORTION DES POMPES (AVEC ENTRETIEN) QUI ONT UNE EFFICACITÉ CROISSANTE APRÈS LE 6IEM MOIS ===
+
+# Identifier les pompes avec entretien
+treated_data <- study_data %>%
+  filter(Treatment == 1)
+
+# Vérifier les colonnes pour le 6ème et le 7ème mois
+eff_month_6 <- "Efficacite6"
+eff_month_7 <- "Efficacite7"
+
+# Calculer la proportion de pompes avec une augmentation d'efficacité après le 6ème mois
+treated_growth <- treated_data %>%
+  filter(!!sym(eff_month_7) > !!sym(eff_month_6))
+
+proportion_growth <- nrow(treated_growth) / nrow(treated_data)
+
+# Afficher le résultat
+cat("Proportion des pompes avec une augmentation d'efficacité après le 6ème mois :", proportion_growth, "\n")
+
+#== TROUVER LA PROPORTION DES POMPES (AVEC ENTRETIENT) AVEC UNE AUGMENTATION D'EFFICACITÉ APRÈS LE 6ÈME MOIS ET QUI ONT UN Cost12 = 500
+# Identifier les pompes avec entretien
+treated_data <- study_data %>%
+  filter(Treatment == 1)
+
+# Vérifier les colonnes pour le 6ème et le 7ème mois
+eff_month_6 <- "Efficacite6"
+eff_month_7 <- "Efficacite7"
+
+# Filtrer les pompes avec une augmentation d'efficacité après le 6ème mois
+treated_growth <- treated_data %>%
+  filter(!!sym(eff_month_7) > !!sym(eff_month_6))
+
+# Filtrer celles ayant un coût d'entretien de 500 au 12ème mois
+treated_growth_with_cost <- treated_growth %>%
+  filter(Cost12 == 500)
+
+# Calculer la proportion
+proportion_growth_with_cost <- nrow(treated_growth_with_cost) / nrow(treated_growth)
+
+# Afficher le résultat
+cat("Proportion des pompes avec augmentation d'efficacité et un coût d'entretien de 500 au 12ème mois :", 
+    proportion_growth_with_cost, "\n")
+
+#== CRÉER LA VARIABLE CIBLE ===
+
+# Identifier les colonnes pertinentes pour l'efficacité
+# Identifier les colonnes pertinentes pour l'efficacité
+efficiency_columns <- grep("^Efficacite", names(study_data), value = TRUE)
+
+# Calculer les seuils basés sur le dataset
+cost_threshold <- 750  # 3ème quartile pour Cost12 basé sur l'analyse précédente
+efficiency_threshold <- study_data %>%
+  select(all_of(efficiency_columns)) %>%
+  summarise(mean_efficiency = mean(unlist(across(everything())), na.rm = TRUE)) %>%
+  pull(mean_efficiency)
+
+# Vérifier que le seuil est bien calculé
+if (is.na(efficiency_threshold)) {
+  stop("Le calcul de efficiency_threshold a échoué. Vérifiez les données d'entrée.")
+}
+
+# Créer la variable cible "Entretien_Necessaire" avec une gestion explicite des NAs
+study_data <- study_data %>%
+  mutate(
+    Entretien_Necessaire = ifelse(
+      # Condition 1: Diminution significative de l'efficacité après le 6ème mois
+      (!is.na(Treatment) & Treatment == 0 &
+         !is.na(Efficacite7) & !is.na(Efficacite6) & Efficacite7 < Efficacite6) |
+        # Condition 2: Coût projeté élevé au 12ème mois
+        (!is.na(Cost12) & Cost12 > cost_threshold) |
+        # Condition 3: Efficacité moyenne inférieure au seuil global pour les 5 premiers mois
+        (rowMeans(select(., all_of(efficiency_columns[1:5])), na.rm = TRUE) < efficiency_threshold),
+      1, 0
+    )
+  )
+
+# Vérifier la distribution de la variable cible
+target_distribution <- study_data %>%
+  count(Entretien_Necessaire)
+
+print(target_distribution)
+
+
+# Identifier les colonnes pertinentes pour les 5 premiers mois
+filtered_columns <- grep("^(Volume[1-5]$|Energy[1-5]$|Efficacite[1-5]$|PSD[0-9]+0[1-5]$)", names(study_data), value = TRUE)
+
+# Ajouter la variable cible "Entretien_Necessaire" aux colonnes sélectionnées
+filtered_columns <- c(filtered_columns, "Entretien_Necessaire")
+
+# Créer un dataset filtré
+study_data_filtered <- study_data[, filtered_columns]
+
+# Vérifier les colonnes filtrées pour validation
+print(names(study_data_filtered))
+
+
+#== DETERMINER LES VARIABLES LES PLUS IMPORTANTES EN UTILISANT RANDOMFOREST ===
+
+# Charger la bibliothèque randomForest
+library(randomForest)
+
+# Assurer que la variable cible est un facteur
+study_data_filtered$Entretien_Necessaire <- as.factor(study_data_filtered$Entretien_Necessaire)
+
+# Créer le modèle Random Forest
+rf_model <- randomForest(
+  Entretien_Necessaire ~ .,  # Modèle basé sur toutes les autres colonnes
+  data = study_data_filtered, 
+  ntree = 500,  # Nombre d'arbres
+  importance = TRUE  # Calculer l'importance des variables
+)
+
+# Extraire les scores d'importance des variables
+variable_importance <- importance(rf_model)
+
+# Convertir les résultats en data.frame pour plus de clarté
+importance_df <- data.frame(
+  Variable = rownames(variable_importance),
+  MeanDecreaseGini = variable_importance[, "MeanDecreaseGini"]
+)
+
+# Trier les variables par importance décroissante
+importance_df <- importance_df[order(-importance_df$MeanDecreaseGini), ]
+
+# Afficher les variables les plus importantes
+print("Variables importantes :")
+print(head(importance_df, 10))  # Afficher les 10 premières variables
+
+# Optionnel : Visualiser les importances avec ggplot2
+library(ggplot2)
+ggplot(importance_df, aes(x = reorder(Variable, MeanDecreaseGini), y = MeanDecreaseGini)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Importance des variables selon Random Forest",
+    x = "Variables",
+    y = "Importance (Mean Decrease Gini)"
+  ) +
+  theme_minimal()
+
+# Définir un seuil pour la sélection des variables importantes
+threshold <- 6  # Ajustez ce seuil selon vos données
+
+# Filtrer les variables importantes
+important_vars <- importance_df$Variable[importance_df$MeanDecreaseGini > threshold]
+
+# Afficher les variables importantes
+print("Variables importantes :")
+print(important_vars)
+
+#== MODELISATION RandomForest ===
+
+# Filtrer les données pour ne conserver que les colonnes importantes et la variable cible
+study_data_filtered_selected <- study_data_filtered[, c(important_vars, "Entretien_Necessaire")]
+
+# Assurer que la variable cible est un facteur
+study_data_filtered_selected$Entretien_Necessaire <- as.factor(study_data_filtered_selected$Entretien_Necessaire)
+
+# Diviser les données en ensemble d'entraînement et de test
+set.seed(123)  # Pour reproductibilité
+train_index <- createDataPartition(study_data_filtered_selected$Entretien_Necessaire, p = 0.8, list = FALSE)
+train_data <- study_data_filtered_selected[train_index, ]
+test_data <- study_data_filtered_selected[-train_index, ]
+
+# Entraîner le modèle Random Forest avec les variables importantes
+rf_model <- randomForest(
+  Entretien_Necessaire ~ .,  # Utiliser uniquement les colonnes importantes
+  data = train_data, 
+  ntree = 500,  # Nombre d'arbres
+  importance = TRUE
+)
+
+# Faire des prédictions sur l'ensemble de test
+test_pred <- predict(rf_model, newdata = test_data)
+
+# Calculer la matrice de confusion
+test_cm <- confusionMatrix(test_pred, test_data$Entretien_Necessaire)
+
+# Afficher la matrice de confusion
+print("Matrice de confusion (Test) :")
+print(test_cm)
+
+#=========================================================================================================================
+
+####======= PRÉPARATION SUR LES DONNÉES DE TEST ==========================================================================
+#Lire les données
+sensors_score <- read.csv("C:/Users/samso/OneDrive/Bureau/Apprentissage statistique/Devoir 1/sensors-score.csv")
+
+# Reshaper les données avec un ID par lignes
+sensors_score_reshaped <- sensors_score %>%
+  pivot_wider(names_from = Month, values_from = c(Volume, Energy, starts_with("PSD"))) %>%
+  rename_with(~ gsub("_", "", .), starts_with("Volume_")) %>%
+  rename_with(~ gsub("_", "", .), starts_with("Energy_")) %>%
+  rename_with(~ gsub("_", "", .), starts_with("PSD"))
+
+# Calcul des colonnes d'efficacité pour chaque mois
+# Étape 1 : Créer une liste des colonnes Volume et Energy
+volume_cols <- grep("^Volume\\d+$", names(sensors_score_reshaped), value = TRUE)
+energy_cols <- gsub("Volume", "Energy", volume_cols)
+
+# Étape 2 : Ajouter les colonnes d'efficacité
+for (i in seq_along(volume_cols)) {
+  sensors_score_reshaped <- sensors_score_reshaped %>%
+    mutate(!!paste0("Efficacite", str_extract(volume_cols[i], "\\d+$")) := 
+             !!sym(volume_cols[i]) / !!sym(energy_cols[i]))
+}
+
+##== PRÉDICTION ==================================
+
+# Filtrer uniquement les variables importantes dans sensors_score_reshaped, exclure `ID` des prédicteurs
+predictor_columns <- setdiff(important_vars, "ID")  # Exclure ID si présent dans les variables importantes
+sensors_score_filtered <- sensors_score_reshaped[, c("ID", predictor_columns)]
+
+
+sensors_score_filtered$Prediction <- predict(rf_model, newdata = sensors_score_filtered[, -1])  # Exclure ID des prédicteurs
+
+# Ajouter les probabilités de prédiction
+sensors_score_filtered$Probability <- predict(rf_model, newdata = sensors_score_filtered[, -1], type = "prob")[, 2]
+
+# Trier les pompes par probabilité de nécessiter un entretien
+sensors_score_ranked <- sensors_score_filtered %>%
+  arrange(desc(Probability))
+
+# Sélectionner les 20 000 premières pompes
+selected_pumps <- sensors_score_ranked %>%
+  slice_head(n = 20000)
+
+# Afficher ou enregistrer les résultats
+print(selected_pumps)
+
+# Sélectionner les 20 000 premières pompes
+
+selected_pumps <- selected_pumps[1:20000, "ID"]
+
+
